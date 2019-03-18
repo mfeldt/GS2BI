@@ -13,7 +13,9 @@ The way to create building instructions is essentially
       - a tutorial can be found here: https://youtu.be/mbef20mRTrI
   * save your file as lxfml
   * run the script like so:
+  ```
        python2 gs2bi.py infile.lxfml outfile.lxfml
+  ```
   * import the outfile.lxfml into LDD
   * look at the very sensible building instructions
   
