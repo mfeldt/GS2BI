@@ -12,7 +12,6 @@ use of gs2bi, you must:
     - cover each and every part of your model
     - groups can contain subgroups, but those that do MUST NOT
       contain any additional non-subgrouped parts!
-  - save your model in lxfml format!
 
 To generate BIs, gi2bs goes backwards through the groups, while LDD
 puts groups in the order they were created.  So it makes sense to
@@ -47,9 +46,11 @@ SOFTWARE.
 """
 
 import xmltodict
-import sys
+import sys, os, errno
 import argparse
-
+import string
+from zipfile import ZipFile 
+from cStringIO import StringIO 
 
 parser = argparse.ArgumentParser(description='Turn LDD grouping information into well-ordere building instructions', epilog=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('infile', metavar='INFILE (lxfml)', type=str, nargs=1, help='input file')
@@ -60,29 +61,64 @@ args = parser.parse_args()
 
 ##
 ##
+## Check integrity
+##
+##
+def get_partrefs_from_group(group):
+    pl = ''
+    if group.has_key('Group'):
+        if group.has_key('@partRefs'):
+            if group['@partRefs'] != '':
+                    raise LookupError("At least one group contains both part references and sub-goups!")
+        if isinstance(group['Group'],list):
+            for i in range(len(group['Group'])-1,-1,-1):
+                pl += get_partrefs_from_group(group['Group'][i])+','
+        else:
+            pl+=get_partrefs_from_group(group['Group'])
+    else:
+        pl += group['@partRefs']+','
+    return(pl)
+    
+    
+
+def check_integrity(d):
+    # get part list 
+    pl = [d['LXFML']['Bricks']['Brick'][i]['@refID'] for i in range(len(d['LXFML']['Bricks']['Brick']))]
+    
+    # get parts in group system
+    gpl=get_partrefs_from_group(d['LXFML']['GroupSystems']['GroupSystem'])
+    gpl = filter(None,gpl.split(','))
+    
+    if set(pl) != set(gpl):
+        mpl = set(pl).difference(set(gpl))
+        print "ERROR: The following parts in the file do not appear in any group system:"
+        print mpl
+        return(mpl)
+    return(None)
+        
+    
+    
+
+
+##
+##
 ## handling of BI step printing
 ##
 ##
-def print_step_begin(steplevel,stepnum):
+def print_step_begin(steplevel,stepnum,f):
     level = steplevel.count('Substep')
     idstr = '    '+' '*2*level
-    print idstr+'<Camera cameraRef="1"/>'
-    print idstr+'<Step name="%s%s">' % (steplevel,stepnum)
+    f.write( idstr+'<Camera cameraRef="1"/>\n')
+    f.write( idstr+'<Step name="%s%s">\n' % (steplevel,stepnum))
 
-def print_step_end(steplevel):
+def print_step_end(steplevel,f):
     level = steplevel.count('Substep')
     idstr = '    '+' '*2*level
-    print idstr+'</Step>'
+    f.write( idstr+'</Step>\n')
 
-def print_step(steplevel,stepnum,refs):
-    level = steplevel.count('Substep')
-    print_step_begin(steplevel,stepnum)
-    print_part_refs(groupsys['Group']['@partRefs'],indent=8+2*level)
-    print_step_end(steplevel)
-
-def print_part_refs(refs,indent=8):
+def print_part_refs(refs,f,indent=8):
     for ref in refs.split(','):
-        print " "*indent,'<PartRef partRef="%s"/>' % ref
+        f.write( " "*indent+'<PartRef partRef="%s"/>\n' % ref)
 
 ##
 ##
@@ -90,25 +126,27 @@ def print_part_refs(refs,indent=8):
 ##
 ##
 
-def handle_group(group,steplevel):
+def handle_group(group,steplevel,f):
     if group.has_key('Group'):
 	if group.has_key('@partRefs'):
 	    if group['@partRefs'] != '':
                 raise LookupError("At least one group contains both part references and sub-goups!")
         if isinstance(group['Group'],list):
             for i in range(len(group['Group'])-1,-1,-1):
-                print_step_begin(steplevel,(i-len(group['Group']))*-1)
+                print_step_begin(steplevel,(i-len(group['Group']))*-1,f)
                 tsteplevel = steplevel + ("%s" % ((i-len(group['Group']))*-1))+"Substep"
-                handle_group(group['Group'][i],tsteplevel)
-                print_step_end(steplevel)
+                handle_group(group['Group'][i],tsteplevel,f)
+                print_step_end(steplevel,f)
         else:
-            print_step_begin(steplevel,1)
+            print_step_begin(steplevel,1,f)
             tsteplevel = steplevel+"1Substep"
-            handle_group(group['Group'],tsteplevel)
-            print_step_end(steplevel)
+            handle_group(group['Group'],tsteplevel,f)
+            print_step_end(steplevel,f)
     else:
         level = steplevel.count('Substep')
-        print_part_refs(group['@partRefs'],indent=8+2*level)
+        print_part_refs(group['@partRefs'],f,indent=8+2*level)
+
+    
 
 ##
 ##
@@ -120,37 +158,68 @@ def handle_group(group,steplevel):
 ##
 ##
 
+ext =  os.path.splitext(args.infile[0])[1]
+
+if ext == '.lxf':
+    fhandler=ZipFile(args.infile[0]).open('IMAGE100.LXFML')
+else:
+    if ext == '.lxfml':
+        fhandler= open(args.infile[0],'r')
+    else:
+        raise IOError("Can only handle .lxf or .lxfml files!")
+al = fhandler.readlines()
+
 ## parse XML
-a=xmltodict.parse(open(args.infile[0],'r'))
+a=xmltodict.parse(string.join(al,"\n"))
 
-## read all lines as strings
-al = open(args.infile[0],'r').readlines()
+mpl = check_integrity(a)
+if mpl is not None:
+    print "Am not generating building instructions!"
+    exit(1)
 
+#al = fhandler.readlines()
+fhandler.close()
 ## find line with original building instructions
 li=['<BuildingInstruction name' in l for l in al]
 idx = li.index(True) # line where building instructions start
 
 ## extract the group system
 groupsys=a['LXFML']['GroupSystems']['GroupSystem']
-
 steplevel="BuildingGuide1Step"
 
+
 ## redirect output to out file if present
-orig_stdout = sys.stdout
 if args.outfile is not None:
-    f = open(args.outfile, 'w')
-    sys.stdout = f
+    ext2 = os.path.splitext(args.outfile)[1]
+    if ext2 != ext:
+        raise IOError("Both input and output must be of same type, either .lxf, or .lxfml!")
+    if ext == '.lxf':
+        ozip = ZipFile(args.outfile,'w') 
+        izip = ZipFile(args.infile[0],'r') 
+        imgList = [(s, izip.read(s)) for s in izip.namelist() if (".png" in s or ".PNG" in s)]
+        ozip.writestr(imgList[0][0],imgList[0][1])
+        f = StringIO()
+    else:
+        f = open(args.outfile, 'w')
+else:
+    f = sys.stdout
 
 ## print original content up to building instructions
 for l in al[:idx+1]:
-    print l,
+    f.write(l)
 
 ## generate new BIs from groups
-handle_group(groupsys,steplevel)
+handle_group(groupsys,steplevel,f)
 
 ## close the file and end
-print """    </BuildingInstruction>
+f.write( """    </BuildingInstruction>
   </BuildingInstructions>
 </LXFML>
-"""
-sys.stdout = orig_stdout
+""")
+
+
+if ext == '.lxf' and args.outfile is not None:
+    ozip.writestr('IMAGE100.LXFML',f.getvalue())
+    ozip.close()
+    izip.close()
+
